@@ -1,0 +1,31 @@
+# Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# Database files (temp / mock DBs)
+*.sqlite
+*.sqlite-wal
+*.sqlite-journal
+*.db
+
+# Excel log output files (prevent pushing test logs to git)
+*.xlsx
+
+# Environment variables & local configuration overrides
+.env
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+
+# OS generated files
+Thumbs.db
+Desktop.ini

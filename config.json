@@ -1,0 +1,11 @@
+{
+    "sqlite_db_path": "C:\\Users\\Public\\Documents\\Metrohm Autolab\\NOVA 2.1\\Database",
+    "excel_output_path": "nova_experiment_log.xlsx",
+    "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
+    "poll_interval_seconds": 1.0,
+    "sqlite_query": "SELECT p.y AS current, p.t AS total_time, p.x AS cycle_time, COALESCE(m.cycle, 1) AS cycle_number FROM point p LEFT JOIN measurementpart m ON p.measurementpart_id = m.measurementpart_id ORDER BY p.point_id DESC LIMIT 1;",
+    "trigger_cycle_time_seconds": 33,
+    "default_starting_glucose": "0",
+    "record_cycles": 50,
+    "skip_cycles": 32
+}
