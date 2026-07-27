@@ -5,9 +5,10 @@ import time
 from datetime import datetime
 import os
 import sys
+import queue
 
 from excel_logger import ExcelLogger
-from data_monitor import NovaDataMonitor
+
 
 class NovaLoggerApp:
     def __init__(self, root):
@@ -48,12 +49,17 @@ class NovaLoggerApp:
         self._last_total_time_seen = -1.0
         self.start_cycle_number = None
         
+        # Monitor reference (set after UI build)
+        self.monitor = None
+        
         # Build UI
         self._build_ui()
         
-        # Start Data Monitor
-        self.monitor = NovaDataMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
-        self.monitor.start()
+        # Start the appropriate data monitor
+        self._start_monitor()
+        
+        # If SDK mode, start polling the status queue
+        self._poll_sdk_status()
 
     def _load_config(self):
         try:
@@ -62,6 +68,7 @@ class NovaLoggerApp:
         except Exception as e:
             print(f"Error loading config: {e}")
             self.config = {
+                "data_source": "sqlite",
                 "sqlite_db_path": "temp_nova_data.sqlite",
                 "excel_output_path": "nova_experiment_log.xlsx",
                 "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
@@ -73,17 +80,83 @@ class NovaLoggerApp:
                 "skip_cycles": 32
             }
         
+        # Determine data source
+        self.data_source = self.config.get("data_source", "sqlite")
+        
         # Override config if running in test mode
-        if os.environ.get("NOVA_TEST_MODE") == "1":
+        test_mode = os.environ.get("NOVA_TEST_MODE", "")
+        if test_mode == "1":
+            self.data_source = "sqlite"
             self.config["sqlite_db_path"] = "temp_nova_data.sqlite"
+        elif test_mode == "sdk":
+            self.data_source = "mock_sdk"
+
+    def _start_monitor(self):
+        """Start the correct data monitor based on data_source config."""
+        if self.data_source == "sdk":
+            from nova_sdk_monitor import NovaSDKMonitor
+            self.monitor = NovaSDKMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
+            self._update_connection_status("Connecting...", "orange")
+        elif self.data_source == "mock_sdk":
+            from mock_sdk import MockSDKMonitor
+            self.monitor = MockSDKMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
+            self._update_connection_status("Mock SDK", "blue")
+        else:
+            from data_monitor import NovaDataMonitor
+            self.monitor = NovaDataMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
+            self._update_connection_status("SQLite Polling", "green")
+        
+        self.monitor.start()
+
+    def _poll_sdk_status(self):
+        """Drain the SDK monitor's status queue and update the connection label."""
+        if self.monitor is not None and hasattr(self.monitor, "status_queue"):
+            try:
+                while True:
+                    status = self.monitor.status_queue.get_nowait()
+                    msg = status.get("msg", "")
+                    level = status.get("level", "info")
+                    
+                    color = "green"
+                    if level == "error":
+                        color = "red"
+                    elif level == "warning":
+                        color = "orange"
+                    elif "Streaming" in msg or "connected" in msg.lower():
+                        color = "green"
+                    elif "Connecting" in msg or "Retrying" in msg:
+                        color = "orange"
+                    
+                    self._update_connection_status(msg, color)
+            except queue.Empty:
+                pass
+        
+        # Re-schedule
+        self.root.after(500, self._poll_sdk_status)
 
     def _build_ui(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
+        # --- Connection Status Section ---
+        conn_frame = ttk.LabelFrame(main_frame, text="Connection", padding="3")
+        conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 5))
+
+        # Data source label
+        source_label = "SDK" if self.data_source in ("sdk", "mock_sdk") else "SQLite"
+        ttk.Label(conn_frame, text=f"Mode: {source_label}", font=("Arial", 8)).grid(
+            row=0, column=0, sticky=tk.W, padx=5
+        )
+        
+        # Connection status indicator
+        self.lbl_conn_status = ttk.Label(
+            conn_frame, text="Initializing...", font=("Arial", 8, "bold"), foreground="orange"
+        )
+        self.lbl_conn_status.grid(row=0, column=1, sticky=tk.E, padx=5)
+
         # --- Data Display Section ---
         data_frame = ttk.LabelFrame(main_frame, text="Live Experiment Data", padding="5")
-        data_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        data_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         # Current
         ttk.Label(data_frame, text="Current (A):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
@@ -110,7 +183,7 @@ class NovaLoggerApp:
 
         # --- Quick Buttons Section ---
         btn_frame = ttk.LabelFrame(main_frame, text="Quick Glucose Logging", padding="5")
-        btn_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        btn_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         preset_values = self.config.get("preset_glucose_values", ["0", "25", "50", "75", "100", "150", "200"])
         
@@ -124,7 +197,7 @@ class NovaLoggerApp:
 
         # --- Manual Entry Section ---
         manual_frame = ttk.Frame(main_frame)
-        manual_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        manual_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E))
         
         ttk.Label(manual_frame, text="Manual:").pack(side=tk.LEFT, padx=(0, 5))
         self.entry_manual = ttk.Entry(manual_frame, width=10)
@@ -136,7 +209,14 @@ class NovaLoggerApp:
         
         # Status Label
         self.lbl_status = ttk.Label(main_frame, text="Ready.", foreground="green", font=("Arial", 8))
-        self.lbl_status.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+        self.lbl_status.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+
+    def _update_connection_status(self, msg, color="green"):
+        """Update the connection status indicator in the UI."""
+        if hasattr(self, 'lbl_conn_status'):
+            # Truncate long messages for the label
+            display_msg = msg if len(msg) <= 40 else msg[:37] + "..."
+            self.lbl_conn_status.config(text=display_msg, foreground=color)
 
     def _log_manual(self):
         val = self.entry_manual.get().strip()
@@ -244,11 +324,12 @@ class NovaLoggerApp:
         self._last_cycle_time_seen = cycle_time
 
     def _on_monitor_error(self, err_msg):
-        self.root.after(0, lambda: self._update_status("DB Error", "red"))
+        self.root.after(0, lambda: self._update_status("Data Error", "red"))
         print(err_msg)
         
     def on_closing(self):
-        self.monitor.stop()
+        if self.monitor:
+            self.monitor.stop()
         self.root.destroy()
 
 if __name__ == "__main__":

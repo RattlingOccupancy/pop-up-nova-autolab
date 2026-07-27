@@ -1,4 +1,13 @@
 {
+    "data_source": "sdk",
+
+    "sdk_dll_path": "C:\\Program Files\\Metrohm Autolab\\Autolab SDK 2.1\\EcoChemie.Autolab.Sdk",
+    "hardware_setup_file": "",
+    "nox_procedure_path": "",
+    "current_signal_name": "WE(1).Current",
+    "time_signal_name": "Time",
+    "sdk_poll_rate_hz": 5,
+
     "sqlite_db_path": "C:\\Users\\Public\\Documents\\Metrohm Autolab\\NOVA 2.1\\Database",
     "excel_output_path": "nova_experiment_log.xlsx",
     "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
