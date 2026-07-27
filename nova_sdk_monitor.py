@@ -127,7 +127,10 @@ class NovaSDKMonitor(threading.Thread):
             # Setting EmbeddedExeFileToStart to None tells the SDK to
             # attach to the already-running NOVA instance rather than
             # launching a competing process.
-            self._instrument.AutolabConnectionSettings.EmbeddedExeFileToStart = None
+            try:
+                self._instrument.AutolabConnectionSettings.EmbeddedExeFileToStart = None
+            except AttributeError:
+                self._push_status("AutolabConnectionSettings not found (normal for some SDK versions)", "warning")
 
             # Hardware setup (required even in attached mode)
             if self.hardware_setup_file and os.path.exists(self.hardware_setup_file):
