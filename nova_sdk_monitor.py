@@ -123,17 +123,35 @@ class NovaSDKMonitor(threading.Thread):
             SDK = self._sdk_module
             self._instrument = SDK.Instrument()
 
-            # --- NOVA-managed mode: do NOT start an embedded exe ---
-            # Setting EmbeddedExeFileToStart to None tells the SDK to
-            # attach to the already-running NOVA instance rather than
-            # launching a competing process.
+            # --- THE MAGIC SEQUENCE FOR NOVA-MANAGED MODE ---
+            # To avoid a "Value cannot be null" error in Path.Combine, we must
+            # first set EmbeddedExeFileToStart to the valid Adk.x path so the SDK
+            # internally caches the directory.
+            # Then we set HardwareSetupFile.
+            # Then we set EmbeddedExeFileToStart back to None so it attaches to
+            # the running NOVA instead of claiming the WinUSB device directly.
+            
+            adk_path = r"C:\Program Files\Metrohm Autolab\Autolab SDK 2.1\Hardware Setup Files\Adk.x"
+            if self.config.get("sdk_dll_path"):
+                base_sdk = os.path.dirname(self.config["sdk_dll_path"])
+                test_path = os.path.join(base_sdk, "Hardware Setup Files", "Adk.x")
+                if os.path.exists(test_path):
+                    adk_path = test_path
+
+            # Step 1: Set to valid path
             try:
-                self._instrument.AutolabConnectionSettings.EmbeddedExeFileToStart = None
+                self._instrument.AutolabConnectionSettings.EmbeddedExeFileToStart = adk_path
             except AttributeError:
-                self._push_status("AutolabConnectionSettings not found (normal for some SDK versions)", "warning")
+                pass
+            try:
+                self._instrument.AutolabConnection.EmbeddedExeFileToStart = adk_path
+            except AttributeError:
+                pass
 
             # Hardware setup (required even in attached mode)
-            if self.hardware_setup_file and os.path.exists(self.hardware_setup_file):
+            if self.hardware_setup_file:
+                if not os.path.exists(self.hardware_setup_file):
+                    raise ValueError(f"Hardware setup file NOT FOUND on disk: {self.hardware_setup_file}")
                 self._instrument.HardwareSetupFile = self.hardware_setup_file
             else:
                 # Try to auto-detect common paths
@@ -141,13 +159,28 @@ class NovaSDKMonitor(threading.Thread):
                     r"C:\ProgramData\Metrohm Autolab\12345\HardwareSetup.xml",
                     r"C:\ProgramData\Metrohm Autolab\HardwareSetup.xml",
                 ]
+                found = False
                 for p in common_paths:
                     if os.path.exists(p):
                         self._instrument.HardwareSetupFile = p
                         self._push_status(f"Auto-detected hardware setup: {p}")
+                        found = True
                         break
+                if not found:
+                    raise ValueError("No HardwareSetupFile configured in config.json, and auto-detect failed.")
 
             # Connect
+            
+            # Step 3: Set back to None for NOVA-managed (Attached) mode
+            try:
+                self._instrument.AutolabConnectionSettings.EmbeddedExeFileToStart = None
+            except AttributeError:
+                pass
+            try:
+                self._instrument.AutolabConnection.EmbeddedExeFileToStart = None
+            except AttributeError:
+                pass
+                
             self._instrument.Connect()
             self._connected = True
             self._push_status("Connected to Autolab instrument")
