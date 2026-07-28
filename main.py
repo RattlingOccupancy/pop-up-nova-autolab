@@ -6,7 +6,6 @@ from datetime import datetime
 import os
 import sys
 
-from excel_logger import ExcelLogger
 from data_monitor import NovaDataMonitor
 
 class NovaLoggerApp:
@@ -27,8 +26,7 @@ class NovaLoggerApp:
         # Load config
         self._load_config()
         
-        # Initialize Logger
-        self.excel_logger = ExcelLogger(os.path.join(self.base_dir, self.config.get("excel_output_path", "nova_experiment_log.xlsx")))
+        # Initialize Logger (Excel removed)
         
         # Latest data state
         self.latest_data = {
@@ -58,7 +56,6 @@ class NovaLoggerApp:
             print(f"Error loading config: {e}")
             self.config = {
                 "text_file_path": "Data_sample1",
-                "excel_output_path": "nova_experiment_log.xlsx",
                 "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
                 "poll_interval_seconds": 1.0,
                 "log_on_index": 30,
@@ -137,26 +134,10 @@ class NovaLoggerApp:
         self.active_glucose = str(value)
         self.lbl_active_glucose.config(text=self.active_glucose)
         
-        # Log immediately
-        self._write_to_excel(is_auto=False)
-
-    def _write_to_excel(self, is_auto=False):
+        # Just update status
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        success = self.excel_logger.log_entry(
-            timestamp=timestamp,
-            cycle_number=self.latest_data.get("cycle_number", 0),
-            cycle_time=self.latest_data.get("cycle_time", 0.0),
-            total_time=self.latest_data.get("total_time", 0.0),
-            current=self.latest_data.get("current", 0.0),
-            glucose_concentration=self.active_glucose
-        )
-        
-        if success:
-            prefix = "Auto-logged" if is_auto else "Manually logged"
-            self._update_status(f"{prefix} {self.active_glucose} at {timestamp.split(' ')[1]}", "green")
-        else:
-            self._update_status("Error logging to Excel!", "red")
+        self._update_status(f"Manually set {self.active_glucose} at {timestamp.split(' ')[1]}", "green")
+
 
     def _update_status(self, msg, color):
         self.lbl_status.config(text=msg, foreground=color)
@@ -174,12 +155,13 @@ class NovaLoggerApp:
         self.lbl_index.config(text=f"{data.get('index', 0)}")
         self.lbl_total_time.config(text=f"{data.get('total_time', 0.0):.2f}")
 
-        # Check if we should log based on index
+        # Check if we should log based on index (Auto-logging removed)
         current_index = data.get("index", 0)
         current_cycle = data.get("cycle_number", 0)
         
         if current_index == self.log_on_index and self._last_cycle_logged != current_cycle:
-            self._write_to_excel(is_auto=True)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._update_status(f"Auto-reached index {self.log_on_index} at {timestamp.split(' ')[1]}", "green")
             self._last_cycle_logged = current_cycle
 
     def _on_monitor_error(self, err_msg):

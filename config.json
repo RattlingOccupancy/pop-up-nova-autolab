@@ -1,6 +1,5 @@
 {
     "text_file_path": "C:\\Users\\dell\\Desktop\\python\\Data_sample1",
-    "excel_output_path": "nova_experiment_log.xlsx",
     "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
     "poll_interval_seconds": 0.25,
     "log_on_index": 30,
