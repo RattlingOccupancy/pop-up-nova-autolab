@@ -1,4 +1,1 @@
-pandas
 openpyxl
-pyodbc
-pythonnet

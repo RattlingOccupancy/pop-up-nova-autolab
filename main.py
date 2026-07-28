@@ -5,15 +5,14 @@ import time
 from datetime import datetime
 import os
 import sys
-import queue
 
 from excel_logger import ExcelLogger
-
+from data_monitor import NovaDataMonitor
 
 class NovaLoggerApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Nova Glucose Logger")
+        self.root.title("Nova Autolab Logger")
         
         # Always on top
         self.root.attributes('-topmost', True)
@@ -36,30 +35,20 @@ class NovaLoggerApp:
             "cycle_number": 0,
             "cycle_time": 0.0,
             "total_time": 0.0,
-            "current": 0.0
+            "current": 0.0,
+            "index": 0
         }
         
         self.active_glucose = str(self.config.get("default_starting_glucose", "0"))
-        self.trigger_cycle_time = float(self.config.get("trigger_cycle_time_seconds", 33))
-        self.record_cycles = int(self.config.get("record_cycles", 50))
-        self.skip_cycles = int(self.config.get("skip_cycles", 32))
-        self._last_cycle_number_logged = None   # tracks which cycle we've already fired for
-        self._last_cycle_time_seen = -1.0       # tracks previous cycle_time, for crossing detection
-        self._last_db_path = None
-        self._last_total_time_seen = -1.0
-        self.start_cycle_number = None
-        
-        # Monitor reference (set after UI build)
-        self.monitor = None
+        self.log_on_index = int(self.config.get("log_on_index", 30))
+        self._last_cycle_logged = -1
         
         # Build UI
         self._build_ui()
         
-        # Start the appropriate data monitor
-        self._start_monitor()
-        
-        # If SDK mode, start polling the status queue
-        self._poll_sdk_status()
+        # Start Data Monitor
+        self.monitor = NovaDataMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
+        self.monitor.start()
 
     def _load_config(self):
         try:
@@ -68,95 +57,21 @@ class NovaLoggerApp:
         except Exception as e:
             print(f"Error loading config: {e}")
             self.config = {
-                "data_source": "sqlite",
-                "sqlite_db_path": "temp_nova_data.sqlite",
+                "text_file_path": "Data_sample1",
                 "excel_output_path": "nova_experiment_log.xlsx",
                 "preset_glucose_values": ["0", "25", "50", "75", "100", "150", "200"],
                 "poll_interval_seconds": 1.0,
-                "sqlite_query": "SELECT p.y AS current, p.t AS total_time, p.t AS cycle_time, COALESCE(m.cycle, 1) AS cycle_number FROM point p LEFT JOIN measurementpart m ON p.measurementpart_id = m.measurementpart_id ORDER BY p.point_id DESC LIMIT 1;",
-                "trigger_cycle_time_seconds": 33,
-                "default_starting_glucose": "0",
-                "record_cycles": 50,
-                "skip_cycles": 32
+                "log_on_index": 30,
+                "default_starting_glucose": "0"
             }
-        
-        # Determine data source
-        self.data_source = self.config.get("data_source", "sqlite")
-        
-        # Override config if running in test mode
-        test_mode = os.environ.get("NOVA_TEST_MODE", "")
-        if test_mode == "1":
-            self.data_source = "sqlite"
-            self.config["sqlite_db_path"] = "temp_nova_data.sqlite"
-        elif test_mode == "sdk":
-            self.data_source = "mock_sdk"
-
-    def _start_monitor(self):
-        """Start the correct data monitor based on data_source config."""
-        if self.data_source == "sdk":
-            from nova_sdk_monitor import NovaSDKMonitor
-            self.monitor = NovaSDKMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
-            self._update_connection_status("Connecting...", "orange")
-        elif self.data_source == "mock_sdk":
-            from mock_sdk import MockSDKMonitor
-            self.monitor = MockSDKMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
-            self._update_connection_status("Mock SDK", "blue")
-        else:
-            from data_monitor import NovaDataMonitor
-            self.monitor = NovaDataMonitor(self.config_path, self._on_data_update, self._on_monitor_error)
-            self._update_connection_status("SQLite Polling", "green")
-        
-        self.monitor.start()
-
-    def _poll_sdk_status(self):
-        """Drain the SDK monitor's status queue and update the connection label."""
-        if self.monitor is not None and hasattr(self.monitor, "status_queue"):
-            try:
-                while True:
-                    status = self.monitor.status_queue.get_nowait()
-                    msg = status.get("msg", "")
-                    level = status.get("level", "info")
-                    
-                    color = "green"
-                    if level == "error":
-                        color = "red"
-                    elif level == "warning":
-                        color = "orange"
-                    elif "Streaming" in msg or "connected" in msg.lower():
-                        color = "green"
-                    elif "Connecting" in msg or "Retrying" in msg:
-                        color = "orange"
-                    
-                    self._update_connection_status(msg, color)
-            except queue.Empty:
-                pass
-        
-        # Re-schedule
-        self.root.after(500, self._poll_sdk_status)
 
     def _build_ui(self):
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
 
-        # --- Connection Status Section ---
-        conn_frame = ttk.LabelFrame(main_frame, text="Connection", padding="3")
-        conn_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 5))
-
-        # Data source label
-        source_label = "SDK" if self.data_source in ("sdk", "mock_sdk") else "SQLite"
-        ttk.Label(conn_frame, text=f"Mode: {source_label}", font=("Arial", 8)).grid(
-            row=0, column=0, sticky=tk.W, padx=5
-        )
-        
-        # Connection status indicator
-        self.lbl_conn_status = ttk.Label(
-            conn_frame, text="Initializing...", font=("Arial", 8, "bold"), foreground="orange"
-        )
-        self.lbl_conn_status.grid(row=0, column=1, sticky=tk.E, padx=5)
-
         # --- Data Display Section ---
         data_frame = ttk.LabelFrame(main_frame, text="Live Experiment Data", padding="5")
-        data_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        data_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         # Current
         ttk.Label(data_frame, text="Current (A):").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
@@ -168,9 +83,9 @@ class NovaLoggerApp:
         self.lbl_cycle_num = ttk.Label(data_frame, text="0")
         self.lbl_cycle_num.grid(row=1, column=1, sticky=tk.W, padx=5, pady=2)
 
-        ttk.Label(data_frame, text="Cycle Time (s):").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
-        self.lbl_cycle_time = ttk.Label(data_frame, text="0.0")
-        self.lbl_cycle_time.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(data_frame, text="Index:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.lbl_index = ttk.Label(data_frame, text="0")
+        self.lbl_index.grid(row=2, column=1, sticky=tk.W, padx=5, pady=2)
 
         ttk.Label(data_frame, text="Total Time (s):").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
         self.lbl_total_time = ttk.Label(data_frame, text="0.0")
@@ -183,7 +98,7 @@ class NovaLoggerApp:
 
         # --- Quick Buttons Section ---
         btn_frame = ttk.LabelFrame(main_frame, text="Quick Glucose Logging", padding="5")
-        btn_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
+        btn_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 10))
 
         preset_values = self.config.get("preset_glucose_values", ["0", "25", "50", "75", "100", "150", "200"])
         
@@ -197,7 +112,7 @@ class NovaLoggerApp:
 
         # --- Manual Entry Section ---
         manual_frame = ttk.Frame(main_frame)
-        manual_frame.grid(row=3, column=0, columnspan=2, sticky=(tk.W, tk.E))
+        manual_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E))
         
         ttk.Label(manual_frame, text="Manual:").pack(side=tk.LEFT, padx=(0, 5))
         self.entry_manual = ttk.Entry(manual_frame, width=10)
@@ -209,14 +124,7 @@ class NovaLoggerApp:
         
         # Status Label
         self.lbl_status = ttk.Label(main_frame, text="Ready.", foreground="green", font=("Arial", 8))
-        self.lbl_status.grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
-
-    def _update_connection_status(self, msg, color="green"):
-        """Update the connection status indicator in the UI."""
-        if hasattr(self, 'lbl_conn_status'):
-            # Truncate long messages for the label
-            display_msg = msg if len(msg) <= 40 else msg[:37] + "..."
-            self.lbl_conn_status.config(text=display_msg, foreground=color)
+        self.lbl_status.grid(row=3, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
 
     def _log_manual(self):
         val = self.entry_manual.get().strip()
@@ -235,23 +143,12 @@ class NovaLoggerApp:
     def _write_to_excel(self, is_auto=False):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        cycle_number = self.latest_data.get("cycle_number", 0)
-        start_cycle = self.start_cycle_number if self.start_cycle_number is not None else 1
-        relative_cycle = max(1, cycle_number - start_cycle + 1)
-        
-        window_size = self.record_cycles + self.skip_cycles
-        if window_size > 0:
-            position = (relative_cycle - 1) % window_size
-            display_cycle = position + 1
-        else:
-            display_cycle = relative_cycle
-
         success = self.excel_logger.log_entry(
             timestamp=timestamp,
-            cycle_number=display_cycle,
-            cycle_time=self.latest_data["cycle_time"],
-            total_time=self.latest_data["total_time"],
-            current=self.latest_data["current"],
+            cycle_number=self.latest_data.get("cycle_number", 0),
+            cycle_time=self.latest_data.get("cycle_time", 0.0),
+            total_time=self.latest_data.get("total_time", 0.0),
+            current=self.latest_data.get("current", 0.0),
             glucose_concentration=self.active_glucose
         )
         
@@ -271,65 +168,26 @@ class NovaLoggerApp:
         self.root.after(0, self._update_ui_with_data, data)
 
     def _update_ui_with_data(self, data):
-        db_path = data.get("db_path")
-        total_time = data.get("total_time", 0.0)
-        cycle_number = data.get("cycle_number", 0)
-        cycle_time = data.get("cycle_time", 0.0)
-        
-        # Check for experiment reset/new experiment file/time restart
-        if (self._last_db_path is not None and db_path != self._last_db_path) or (total_time < self._last_total_time_seen):
-            self._last_cycle_number_logged = None
-            self._last_cycle_time_seen = -1.0
-            self.start_cycle_number = None
-            
-        self._last_db_path = db_path
-        self._last_total_time_seen = total_time
-        
-        # Initialize start cycle number when we see the first valid cycle number
-        if self.start_cycle_number is None and cycle_number > 0:
-            self.start_cycle_number = cycle_number
-            
-        # Calculate relative cycle number
-        start_cycle = self.start_cycle_number if self.start_cycle_number is not None else 1
-        relative_cycle = max(1, cycle_number - start_cycle + 1)
-        
-        window_size = self.record_cycles + self.skip_cycles
-        if window_size > 0:
-            position = (relative_cycle - 1) % window_size
-            display_cycle = position + 1
-            is_recording_cycle = position < self.record_cycles
-        else:
-            display_cycle = relative_cycle
-            is_recording_cycle = True
-
         self.latest_data = data
         self.lbl_current.config(text=f"{data.get('current', 0.0):.6e}")
-        self.lbl_cycle_num.config(text=f"{display_cycle}")
-        self.lbl_cycle_time.config(text=f"{cycle_time:.2f}")
-        self.lbl_total_time.config(text=f"{total_time:.2f}")
+        self.lbl_cycle_num.config(text=f"{data.get('cycle_number', 0)}")
+        self.lbl_index.config(text=f"{data.get('index', 0)}")
+        self.lbl_total_time.config(text=f"{data.get('total_time', 0.0):.2f}")
 
-        # New cycle started -> allow logging again
-        if cycle_number != self._last_cycle_number_logged and cycle_time < self._last_cycle_time_seen:
-            self._last_cycle_number_logged = None
-
-        # Fire once when cycle_time crosses the threshold, per cycle
-        if (self._last_cycle_time_seen < self.trigger_cycle_time <= cycle_time
-                and cycle_number != self._last_cycle_number_logged):
-            
-            if is_recording_cycle:
-                self._write_to_excel(is_auto=True)
-                
-            self._last_cycle_number_logged = cycle_number
-
-        self._last_cycle_time_seen = cycle_time
+        # Check if we should log based on index
+        current_index = data.get("index", 0)
+        current_cycle = data.get("cycle_number", 0)
+        
+        if current_index == self.log_on_index and self._last_cycle_logged != current_cycle:
+            self._write_to_excel(is_auto=True)
+            self._last_cycle_logged = current_cycle
 
     def _on_monitor_error(self, err_msg):
-        self.root.after(0, lambda: self._update_status("Data Error", "red"))
+        self.root.after(0, lambda: self._update_status(err_msg[:40], "red"))
         print(err_msg)
         
     def on_closing(self):
-        if self.monitor:
-            self.monitor.stop()
+        self.monitor.stop()
         self.root.destroy()
 
 if __name__ == "__main__":

@@ -1,8 +1,6 @@
-import sqlite3
 import threading
 import time
 import json
-import urllib.parse
 import os
 
 class NovaDataMonitor(threading.Thread):
@@ -14,6 +12,17 @@ class NovaDataMonitor(threading.Thread):
         self.error_callback = error_callback
         
         self.running = True
+        self.last_position = 0
+        self.cycle_number = 0
+        self.last_index = 0
+        
+        self.latest_data = {
+            "cycle_number": 0,
+            "cycle_time": 0.0,
+            "total_time": 0.0,
+            "current": 0.0,
+            "index": 0
+        }
         
         # Load initial config
         self._load_config()
@@ -25,9 +34,8 @@ class NovaDataMonitor(threading.Thread):
         except Exception as e:
             self.error_callback(f"Failed to load config: {e}")
             self.config = {
-                "sqlite_db_path": "C:\\temp_nova_data.sqlite",
-                "poll_interval_seconds": 1.0,
-                "sqlite_query": "SELECT * FROM measurement_data ORDER BY id DESC LIMIT 1;"
+                "text_file_path": "Data_sample1",
+                "poll_interval_seconds": 1.0
             }
 
     def stop(self):
@@ -37,80 +45,69 @@ class NovaDataMonitor(threading.Thread):
         while self.running:
             try:
                 self._load_config()
-                db_path = self.config.get("sqlite_db_path", "")
-                if not os.path.isabs(db_path):
-                    # Resolve relative to the config file's directory
-                    config_dir = os.path.dirname(os.path.abspath(self.config_path))
-                    db_path = os.path.join(config_dir, db_path)
+                text_file_path = self.config.get("text_file_path", "")
                 
-                # Auto-detect latest modified SQLite file if a directory is provided
-                candidate_paths = []
-                if os.path.isdir(db_path):
-                    import glob
-                    # Search for idf.sqlite, tmp.sqlite, raw.sqlite, and general sqlite files
-                    found_files = set()
-                    for pattern in ["**/*.idf.sqlite", "**/*.tmp.sqlite", "**/*.raw.sqlite", "**/*.sqlite"]:
-                        for f in glob.glob(os.path.join(db_path, pattern), recursive=True):
-                            found_files.add(f)
-                    
-                    if found_files:
-                        # Pick the most recently modified database files
-                        candidate_paths = sorted(list(found_files), key=os.path.getmtime, reverse=True)[:10]
-                else:
-                    candidate_paths = [db_path]
-                
-                query = self.config.get("sqlite_query", "")
-                success = False
-                last_error = None
+                if not os.path.exists(text_file_path):
+                    self.error_callback(f"File not found: {text_file_path}")
+                    time.sleep(self.config.get("poll_interval_seconds", 1.0))
+                    continue
 
-                for current_db_path in candidate_paths:
-                    # Skip 0-byte or inaccessible files early
-                    if not os.path.exists(current_db_path) or os.path.getsize(current_db_path) == 0:
-                        continue
-                        
-                    db_uri = f"file:{urllib.parse.quote(current_db_path)}?mode=ro"
-                    
-                    try:
-                        conn = sqlite3.connect(db_uri, uri=True)
-                        conn.row_factory = sqlite3.Row
-                        cursor = conn.cursor()
-                        
-                        cursor.execute(query)
-                        row = cursor.fetchone()
-                        
-                        if row:
-                            data = dict(row)
-                            cycle_number = data.get("cycle_number", data.get("cycle", 0))
-                            cycle_time = data.get("cycle_time", 0.0)
-                            total_time = data.get("total_time", data.get("time", 0.0))
-                            current = data.get("current", data.get("i", 0.0))
-                            
-                            self.update_callback({
-                                "cycle_number": cycle_number,
-                                "cycle_time": cycle_time,
-                                "total_time": total_time,
-                                "current": current,
-                                "db_path": current_db_path
-                            })
-                        
-                        conn.close()
-                        success = True
-                        break # Found valid DB and updated successfully
-                    except sqlite3.OperationalError as e:
-                        last_error = f"SQLite Operational Error: {e} ({os.path.basename(current_db_path)})"
-                        if 'conn' in locals():
-                            try: conn.close()
-                            except: pass
-                        continue # Try next candidate file
-                    except Exception as e:
-                        last_error = f"SQLite Query Error: {e} ({os.path.basename(current_db_path)})"
-                        if 'conn' in locals():
-                            try: conn.close()
-                            except: pass
-                        continue
+                current_size = os.path.getsize(text_file_path)
+                if current_size < self.last_position:
+                    # File was truncated/restarted
+                    self.last_position = 0
+                    self.cycle_number = 0
+                    self.last_index = 0
+                    self.latest_data = {
+                        "cycle_number": 0,
+                        "cycle_time": 0.0,
+                        "total_time": 0.0,
+                        "current": 0.0,
+                        "index": 0
+                    }
 
-                if not success and last_error:
-                    self.error_callback(f"{last_error}. Is an experiment actively running?")
+                if current_size > self.last_position:
+                    with open(text_file_path, 'r') as f:
+                        f.seek(self.last_position)
+                        lines = f.readlines()
+                        self.last_position = f.tell()
+                        
+                        data_updated = False
+                        
+                        for line in lines:
+                            parts = line.strip().split()
+                            # Nova Autolab sometimes uses multiple spaces or tabs,
+                            # split() handles any whitespace sequence.
+                            if len(parts) >= 3:
+                                try:
+                                    # Try parsing the first column as an integer (Index)
+                                    index_val_float = float(parts[0])
+                                    index_val = int(index_val_float)
+                                    time_val = float(parts[1])
+                                    current_val = float(parts[-1]) # Use last column for current
+                                    
+                                    # If index drops to 1 after being > 1, it's a new cycle
+                                    if index_val == 1 and self.last_index > 1:
+                                        self.cycle_number += 1
+                                    elif self.cycle_number == 0 and index_val > 0:
+                                        self.cycle_number = 1
+                                        
+                                    self.last_index = index_val
+                                    
+                                    self.latest_data["cycle_number"] = self.cycle_number
+                                    self.latest_data["cycle_time"] = time_val  # Assuming time starts near 0 each cycle, if not, could use a relative calculation
+                                    self.latest_data["total_time"] = time_val  # Note: if time resets, total_time needs accumulation. We'll pass raw for now.
+                                    self.latest_data["current"] = current_val
+                                    self.latest_data["index"] = index_val
+                                    
+                                    data_updated = True
+                                    
+                                except ValueError:
+                                    # Header row or empty row, just skip
+                                    pass
+
+                        if data_updated:
+                            self.update_callback(self.latest_data)
 
             except Exception as e:
                 self.error_callback(f"Monitor Thread Error: {e}")
